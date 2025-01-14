@@ -39,3 +39,16 @@ Rules:
 - For lists: return a Python list
 
 Code:"""
+
+
+def generate_code(client: Anthropic, prompt: str) -> str:
+    """Call Claude to generate pandas code for the given prompt."""
+    try:
+        response = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=256,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        return response.content[0].text.strip()
+    except Exception as e:
+        return f"__ERROR__: {e}"
