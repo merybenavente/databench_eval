@@ -4,8 +4,10 @@ import os
 import pandas as pd
 import numpy as np
 
+from tqdm import tqdm
 from anthropic import Anthropic
 from databench_eval import Evaluator
+from databench_eval.utils import load_qa, load_table
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
@@ -75,3 +77,33 @@ def verify_result(result, expected: str, semantic_type: str) -> bool:
         return False
     evaluator = Evaluator.__new__(Evaluator)
     return evaluator.default_compare(str(result), expected, semantic_type)
+
+
+def process_dataset(lang: str, split: str = "dev", limit: int = None) -> pd.DataFrame:
+    """Process QA dataset and generate code solutions."""
+    name = "iberlef" if lang == "ES" else "semeval"
+    qa = load_qa(lang=lang, name=name, split=split)
+
+    if limit:
+        qa = qa.select(range(min(limit, len(qa))))
+
+    client = load_client()
+    results = []
+
+    for row in tqdm(qa, desc=f"Processing {lang}"):
+        df = load_table(row["dataset"], lang=lang)
+        prompt = build_prompt(row["question"], df, row["type"])
+        code = generate_code(client, prompt)
+        result = execute_code(code, df)
+        verified = verify_result(result, row["answer"], row["type"])
+
+        results.append({
+            "question": row["question"],
+            "dataset": row["dataset"],
+            "answer": row["answer"],
+            "type": row["type"],
+            "code_solution": code,
+            "code_verified": verified
+        })
+
+    return pd.DataFrame(results)
