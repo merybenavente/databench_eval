@@ -5,6 +5,7 @@ import pandas as pd
 import numpy as np
 
 from anthropic import Anthropic
+from databench_eval import Evaluator
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
@@ -52,3 +53,25 @@ def generate_code(client: Anthropic, prompt: str) -> str:
         return response.content[0].text.strip()
     except Exception as e:
         return f"__ERROR__: {e}"
+
+
+def execute_code(code: str, df: pd.DataFrame):
+    """Execute generated code against dataframe and return result."""
+    try:
+        local_vars = {"df": df, "pd": pd, "np": np}
+        result = eval(code, {"__builtins__": {}}, local_vars)
+        if isinstance(result, pd.Series):
+            result = result.tolist()
+        elif isinstance(result, pd.DataFrame):
+            result = result.iloc[:, 0].tolist()
+        return result
+    except Exception as e:
+        return f"__EXEC_ERROR__: {e}"
+
+
+def verify_result(result, expected: str, semantic_type: str) -> bool:
+    """Check if the executed result matches the expected answer."""
+    if isinstance(result, str) and result.startswith("__"):
+        return False
+    evaluator = Evaluator.__new__(Evaluator)
+    return evaluator.default_compare(str(result), expected, semantic_type)
