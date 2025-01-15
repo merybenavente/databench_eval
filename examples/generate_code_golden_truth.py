@@ -1,6 +1,7 @@
 """Generate golden truth code solutions for DataBench QA using Claude Opus."""
 
 import os
+import argparse
 import pandas as pd
 import numpy as np
 
@@ -107,3 +108,22 @@ def process_dataset(lang: str, split: str = "dev", limit: int = None) -> pd.Data
         })
 
     return pd.DataFrame(results)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Generate code solutions for DataBench QA")
+    parser.add_argument("--lang", choices=["EN", "ES", "both"], default="both")
+    parser.add_argument("--split", default="dev")
+    parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--output", default="golden_truth")
+    args = parser.parse_args()
+
+    langs = ["EN", "ES"] if args.lang == "both" else [args.lang]
+
+    for lang in langs:
+        print(f"\nProcessing {lang} dataset...")
+        df = process_dataset(lang=lang, split=args.split, limit=args.limit)
+        output_path = f"{args.output}_{lang.lower()}.csv"
+        df.to_csv(output_path, index=False)
+        verified_count = df["code_verified"].sum()
+        print(f"Saved to {output_path} - {verified_count}/{len(df)} verified")
