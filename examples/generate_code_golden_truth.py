@@ -49,6 +49,30 @@ Rules:
 Code:"""
 
 
+def build_error_prompt(question: str, df: pd.DataFrame, expected_type: str,
+                       code: str, error: str) -> str:
+    """Build prompt to fix code that failed to execute."""
+    columns = list(df.columns)
+    return f"""Your previous code failed with an error. Fix it.
+
+Question: {question}
+Columns: {columns}
+Expected return type: {expected_type}
+
+Your code:
+{code}
+
+Error:
+{error}
+
+Rules:
+- Return ONLY the corrected code, no explanations
+- The code should be a single expression
+- Use only pandas/numpy operations
+
+Fixed code:"""
+
+
 def clean_code(code: str) -> str:
     """Remove markdown formatting from code response."""
     code = code.strip()
@@ -94,6 +118,26 @@ def verify_result(result, expected: str, semantic_type: str) -> bool:
     return evaluator.default_compare(str(result), expected, semantic_type)
 
 
+def generate_with_retry(client, row, df, max_retries=3):
+    """Generate code with auto-correction on execution errors."""
+    prompt = build_prompt(row["question"], df, row["type"])
+    code = generate_code(client, prompt)
+
+    for attempt in range(max_retries):
+        result = execute_code(code, df)
+        if not str(result).startswith("__EXEC_ERROR__"):
+            return code, result, attempt + 1
+        # Retry with error context
+        error_prompt = build_error_prompt(
+            row["question"], df, row["type"], code, str(result)
+        )
+        code = generate_code(client, error_prompt)
+
+    # Final attempt after last retry
+    result = execute_code(code, df)
+    return code, result, max_retries + 1
+
+
 def process_dataset(lang: str, split: str = "dev", limit: int = None) -> pd.DataFrame:
     """Process QA dataset and generate code solutions."""
     name = "iberlef" if lang == "ES" else "semeval"
@@ -107,9 +151,7 @@ def process_dataset(lang: str, split: str = "dev", limit: int = None) -> pd.Data
 
     for row in tqdm(qa, desc=f"Processing {lang}"):
         df = load_table(row["dataset"], lang=lang)
-        prompt = build_prompt(row["question"], df, row["type"])
-        code = generate_code(client, prompt)
-        result = execute_code(code, df)
+        code, result, attempts = generate_with_retry(client, row, df)
         verified = verify_result(result, row["answer"], row["type"])
 
         results.append({
@@ -118,7 +160,8 @@ def process_dataset(lang: str, split: str = "dev", limit: int = None) -> pd.Data
             "answer": row["answer"],
             "type": row["type"],
             "code_solution": code,
-            "code_verified": verified
+            "code_verified": verified,
+            "attempts": attempts
         })
 
     return pd.DataFrame(results)
