@@ -5,25 +5,29 @@ import argparse
 import pandas as pd
 import numpy as np
 
+from pathlib import Path
+from dotenv import load_dotenv
 from tqdm import tqdm
 from anthropic import Anthropic
 from databench_eval import Evaluator
 from databench_eval.utils import load_qa, load_table
 
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+# Load .env from project root
+load_dotenv(Path(__file__).parent.parent / ".env")
 
 
 def load_client():
     """Initialize and return Anthropic client."""
-    return Anthropic(api_key=ANTHROPIC_API_KEY)
+    return Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
 
 
 def build_prompt(question: str, df: pd.DataFrame, expected_type: str) -> str:
     """Build prompt for code generation given a question and dataframe."""
     columns = list(df.columns)
-    head_rows = df.head(2)
-    random_rows = df.sample(n=min(2, len(df)), random_state=42)
-    sample_rows = pd.concat([head_rows, random_rows]).drop_duplicates().to_string()
+    head_idx = list(range(min(2, len(df))))
+    random_idx = df.sample(n=min(2, len(df)), random_state=42).index.tolist()
+    sample_idx = list(dict.fromkeys(head_idx + random_idx))  # unique, preserves order
+    sample_rows = df.iloc[sample_idx].to_string()
 
     return f"""You are a Principal Data Scientiet and pandas expert. Generate a single line of Python code that answers the question below.
 
@@ -45,6 +49,16 @@ Rules:
 Code:"""
 
 
+def clean_code(code: str) -> str:
+    """Remove markdown formatting from code response."""
+    code = code.strip()
+    if code.startswith("```"):
+        code = code.split("\n", 1)[-1]  # remove first line
+    if code.endswith("```"):
+        code = code.rsplit("```", 1)[0]
+    return code.strip()
+
+
 def generate_code(client: Anthropic, prompt: str) -> str:
     """Call Claude to generate pandas code for the given prompt."""
     try:
@@ -53,7 +67,7 @@ def generate_code(client: Anthropic, prompt: str) -> str:
             max_tokens=256,
             messages=[{"role": "user", "content": prompt}]
         )
-        return response.content[0].text.strip()
+        return clean_code(response.content[0].text)
     except Exception as e:
         return f"__ERROR__: {e}"
 
