@@ -15,6 +15,13 @@ from databench_eval.utils import load_qa, load_table
 # Load .env from project root
 load_dotenv(Path(__file__).parent.parent / ".env")
 
+# Model options: haiku (cheap/fast), sonnet (balanced)
+MODELS = {
+    "haiku": "claude-3-5-haiku-20241022",
+    "sonnet": "claude-sonnet-4-20250514",
+}
+CURRENT_MODEL = "sonnet"
+
 
 def load_client():
     """Initialize and return Anthropic client."""
@@ -73,6 +80,26 @@ Rules:
 Fixed code:"""
 
 
+def build_mismatch_prompt(question: str, df: pd.DataFrame, expected_type: str,
+                          code: str, result, expected: str) -> str:
+    """Build prompt to fix code that returned wrong answer."""
+    columns = list(df.columns)
+    # Truncate long results to avoid API errors
+    result_str = str(result)[:200]
+    expected_str = str(expected)[:200]
+    return f"""Your code returned the wrong answer. Fix it.
+
+Question: {question}
+Columns: {columns}
+Expected type: {expected_type}
+
+Your code: {code}
+Your result: {result_str}
+Expected: {expected_str}
+
+Return ONLY the corrected code:"""
+
+
 def clean_code(code: str) -> str:
     """Remove markdown formatting from code response."""
     code = code.strip()
@@ -87,7 +114,7 @@ def generate_code(client: Anthropic, prompt: str) -> str:
     """Call Claude to generate pandas code for the given prompt."""
     try:
         response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model=MODELS[CURRENT_MODEL],
             max_tokens=256,
             messages=[{"role": "user", "content": prompt}]
         )
@@ -118,24 +145,41 @@ def verify_result(result, expected: str, semantic_type: str) -> bool:
     return evaluator.default_compare(str(result), expected, semantic_type)
 
 
-def generate_with_retry(client, row, df, max_retries=3):
-    """Generate code with auto-correction on execution errors."""
+def generate_with_retry(client, row, df, max_error_retries=3, max_mismatch_retries=2):
+    """Generate code with auto-correction on errors and mismatches."""
     prompt = build_prompt(row["question"], df, row["type"])
     code = generate_code(client, prompt)
+    attempts = 1
 
-    for attempt in range(max_retries):
+    # Phase 1: Retry on execution errors
+    for _ in range(max_error_retries):
         result = execute_code(code, df)
         if not str(result).startswith("__EXEC_ERROR__"):
-            return code, result, attempt + 1
-        # Retry with error context
+            break
         error_prompt = build_error_prompt(
             row["question"], df, row["type"], code, str(result)
         )
         code = generate_code(client, error_prompt)
+        attempts += 1
 
-    # Final attempt after last retry
-    result = execute_code(code, df)
-    return code, result, max_retries + 1
+    # Check if still erroring after retries
+    if str(result).startswith("__EXEC_ERROR__"):
+        return code, result, attempts
+
+    # Phase 2: Retry on result mismatch
+    for _ in range(max_mismatch_retries):
+        if verify_result(result, row["answer"], row["type"]):
+            return code, result, attempts
+        mismatch_prompt = build_mismatch_prompt(
+            row["question"], df, row["type"], code, result, row["answer"]
+        )
+        code = generate_code(client, mismatch_prompt)
+        attempts += 1
+        result = execute_code(code, df)
+        if str(result).startswith("__EXEC_ERROR__"):
+            break  # Don't keep retrying if new code errors
+
+    return code, result, attempts
 
 
 def process_dataset(lang: str, split: str = "dev", limit: int = None) -> pd.DataFrame:
@@ -173,8 +217,12 @@ if __name__ == "__main__":
     parser.add_argument("--split", default="dev")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--output", default="golden_truth")
+    parser.add_argument("--model", choices=["haiku", "sonnet"], default="sonnet",
+                        help="Model to use: haiku (cheap) or sonnet (better)")
     args = parser.parse_args()
 
+    CURRENT_MODEL = args.model  # noqa: F841
+    print(f"Using model: {MODELS[args.model]}")
     langs = ["EN", "ES"] if args.lang == "both" else [args.lang]
 
     for lang in langs:
